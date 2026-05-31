@@ -1,0 +1,43 @@
+<!-- backend/app/templates/data_view.html -->
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Дашборд: {{ test_id }}</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .card { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 12px 0; background: #f9f9f9; }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+        th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #eee; }
+        th { background: #4a5568; color: white; }
+        .metric { font-weight: bold; color: #2b6cb0; }
+    </style>
+</head>
+<body>
+    <h1>📊 Дашборд теста: {{ test_id }}</h1>
+    
+    <div class="card">
+        <h3>🔗 Быстрые ссылки</h3>
+        <ul>
+            <li><a href="/data/wells?test_id={{ test_id }}">Данные скважин (JSON)</a></li>
+            <li><a href="/data/groups?test_id={{ test_id }}">Данные групп (JSON)</a></li>
+            <li><a href="/data/results?test_id={{ test_id }}">Результаты обработки (JSON)</a></li>
+            <li><a href="/docs">📚 API Документация (Swagger)</a></li>
+        </ul>
+    </div>
+
+    <div class="card">
+        <h3>🔄 Загрузить тестовые данные</h3>
+        <p>Выполните в терминале:</p>
+        <pre style="background:#2d3748;color:#e2e8f0;padding:12px;border-radius:4px;">
+docker compose run --rm backend python -m app.scripts.seed_data</pre>
+        <p>Затем обновите страницу или перейдите по ссылкам выше.</p>
+    </div>
+
+    <div class="card">
+        <h3>💡 Совет</h3>
+        <p>Откройте <a href="/docs">/docs</a> — там интерактивная документация со всеми эндпоинтами, 
+        примерами запросов и возможностью тестировать API прямо в браузере.</p>
+    </div>
+</body>
+</html>

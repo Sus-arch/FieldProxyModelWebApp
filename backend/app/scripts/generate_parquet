@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+"""
+Генератор случайных Parquet-файлов для тестирования DB Viewer.
+Соответствует схемам: data.connection, data.well, data.group, unsumry.connection
+
+Данные генерируются равномерно с 2024-01 по 2035-12 с шагом 1 месяц.
+"""
+
+import random
+from datetime import datetime
+from pathlib import Path
+from dateutil.relativedelta import relativedelta
+
+import pandas as pd
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+# ── Конфигурация ─────────────────────────────────────────────────────────────
+OUTPUT_DIR = Path("generated_parquet")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+NULL_PROBABILITY = 0
+
+# Диапазон дат: с января 2024 по декабрь 2035, шаг — 1 месяц
+DATE_START = datetime(2024, 1, 1)
+DATE_END = datetime(2035, 1, 1)
+
+# Пулы идентификаторов
+WELL_IDS = [f"WELL_{i:03d}" for i in range(1, 51)]
+GROUP_IDS = [f"GRP_{i:02d}" for i in range(1, 11)]
+
+# Количество уникальных ячеек (well_id, i, j, k)
+N_CONNECTIONS = 20
+
+
+# ── Утилиты ──────────────────────────────────────────────────────────────────
+
+
+def generate_monthly_dates(start: datetime, end: datetime) -> list[datetime]:
+    """Генерирует список дат с шагом 1 месяц."""
+    dates = []
+    current = start
+    while current <= end:
+        dates.append(current)
+        current += relativedelta(months=1)
+    return dates
+
+
+def generate_perf_indices(n: int) -> pd.DataFrame:
+    """Генерирует уникальные комбинации (i, j, k)."""
+    candidates = n * 3
+    data = {
+        "i": np.random.randint(0, 100, size=candidates),
+        "j": np.random.randint(0, 100, size=candidates),
+        "k": np.random.randint(0, 20, size=candidates),
+    }
+    df = pd.DataFrame(data).drop_duplicates().head(n)
+    while len(df) < n:
+        new_row = {
+            "i": random.randint(0, 100),
+            "j": random.randint(0, 100),
+            "k": random.randint(0, 20),
+        }
+        df = pd.concat(
+            [df, pd.DataFrame([new_row])], ignore_index=True
+        ).drop_duplicates()
+    return df.reset_index(drop=True)
+
+
+def maybe_null(value: float) -> float | None:
+    """С вероятностью NULL_PROBABILITY возвращает None."""
+    return None if random.random() < NULL_PROBABILITY else value
+
+
+# ── Генераторы таблиц ─────────────────────────────────────────────────────────
+
+MONTHLY_DATES = generate_monthly_dates(DATE_START, DATE_END)
+print(
+    f"📅 Сгенерировано {len(MONTHLY_DATES)} месячных дат: {MONTHLY_DATES[0].strftime('%Y-%m')} — {MONTHLY_DATES[-1].strftime('%Y-%m')}"
+)
+
+
+def generate_group_data() -> pd.DataFrame:
+    """data.group: для каждой комбинации (dt, group_id) — одна строка."""
+    records = []
+    for dt in MONTHLY_DATES:
+        for group_id in GROUP_IDS:
+            records.append(
+                {
+                    "dt": dt,
+                    "group_id": group_id,
+                    "geff": maybe_null(round(random.uniform(0.0, 1.0), 6)),
+                }
+            )
+
+    df = pd.DataFrame(records)
+    df["dt"] = pd.to_datetime(df["dt"])
+    df["geff"] = df["geff"].astype("Float64")
+    return df
+
+
+def generate_well_data() -> pd.DataFrame:
+    """data.well: для каждой комбинации (dt, well_id) — одна строка."""
+    records = []
+    for dt in MONTHLY_DATES:
+        for well_id in WELL_IDS:
+            records.append(
+                {
+                    "dt": dt,
+                    "well_id": well_id,
+                    "weff": maybe_null(round(random.uniform(0.0, 1.0), 6)),
+                }
+            )
+
+    df = pd.DataFrame(records)
+    df["dt"] = pd.to_datetime(df["dt"])
+    df["weff"] = df["weff"].astype("Float64")
+    return df
+
+
+def generate_connection_data() -> pd.DataFrame:
+    """data.connection: для каждой комбинации (dt, well_id, i, j, k) — одна строка."""
+    perf_df = generate_perf_indices(N_CONNECTIONS)
+
+    # Привязываем каждую ячейку к случайному well_id
+    perf_df["well_id"] = [random.choice(WELL_IDS) for _ in range(len(perf_df))]
+
+    records = []
+    for dt in MONTHLY_DATES:
+        for _, perf_row in perf_df.iterrows():
+            records.append(
+                {
+                    "dt": dt,
+                    "well_id": perf_row["well_id"],
+                    "i": int(perf_row["i"]),
+                    "j": int(perf_row["j"]),
+                    "k": int(perf_row["k"]),
+                    "swl": maybe_null(round(random.uniform(0.0, 1.0), 6)),
+                    "swu": maybe_null(round(random.uniform(0.0, 1.0), 6)),
+                }
+            )
+
+    df = pd.DataFrame(records)
+    df["dt"] = pd.to_datetime(df["dt"])
+    for col in ["i", "j", "k"]:
+        df[col] = df[col].astype("int32")
+    for col in ["swl", "swu"]:
+        df[col] = df[col].astype("Float64")
+    return df
+
+
+def generate_connection_unsumry() -> pd.DataFrame:
+    """unsumry.connection: для каждой комбинации (dt, well_id, i, j, k) — одна строка."""
+    perf_df = generate_perf_indices(N_CONNECTIONS)
+    perf_df["well_id"] = [random.choice(WELL_IDS) for _ in range(len(perf_df))]
+
+    records = []
+    for dt in MONTHLY_DATES:
+        for _, perf_row in perf_df.iterrows():
+            # CBP с трендом + шум (чтобы модели было что учить)
+            month_idx = (dt.year - 2024) * 12 + dt.month
+            base_cbp = 1000 + month_idx * 500 + random.gauss(0, 10000)
+
+            records.append(
+                {
+                    "dt": dt,
+                    "well_id": perf_row["well_id"],
+                    "i": int(perf_row["i"]),
+                    "j": int(perf_row["j"]),
+                    "k": int(perf_row["k"]),
+                    "cgpr": maybe_null(round(random.uniform(0, 10000), 4)),
+                    "cgpt": maybe_null(round(random.uniform(0, 1_000), 2)),
+                    "cwpr": maybe_null(round(random.uniform(0, 5000), 4)),
+                    "cwpt": maybe_null(round(random.uniform(0, 5000), 2)),
+                    "cbp": round(max(0, base_cbp), 2),
+                }
+            )
+
+    df = pd.DataFrame(records)
+    df["dt"] = pd.to_datetime(df["dt"])
+    for col in ["i", "j", "k"]:
+        df[col] = df[col].astype("int32")
+    for col in ["cgpr", "cgpt", "cwpr", "cwpt", "cbp"]:
+        df[col] = df[col].astype("Float64")
+    return df
+
+
+# ── Экспорт в Parquet ─────────────────────────────────────────────────────────
+
+
+def save_parquet(df: pd.DataFrame, filename: str, schema_name: str):
+    """Сохраняет DataFrame как Parquet с метаданными схемы."""
+    filepath = OUTPUT_DIR / filename
+
+    metadata = {
+        b"schema": schema_name.encode(),
+        b"generated_at": datetime.now().isoformat().encode(),
+        b"row_count": str(len(df)).encode(),
+        b"date_range": f"{MONTHLY_DATES[0].strftime('%Y-%m')} — {MONTHLY_DATES[-1].strftime('%Y-%m')}".encode(),
+        b"date_step": b"1 month",
+    }
+
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    existing_meta = table.schema.metadata or {}
+    table = table.replace_schema_metadata({**existing_meta, **metadata})
+
+    pq.write_table(
+        table,
+        filepath,
+        compression="snappy",
+        use_dictionary=True,
+        write_statistics=True,
+    )
+    print(f"  ✓ {filepath} ({len(df):,} строк)")
+
+
+# ── Главная ───────────────────────────────────────────────────────────────────
+
+
+def main():
+    print(f"\n🚀 Генерация тестовых Parquet-файлов в {OUTPUT_DIR.absolute()}")
+    print(
+        f"📅 Период: {DATE_START.strftime('%Y-%m')} — {DATE_END.strftime('%Y-%m')}, шаг: 1 месяц"
+    )
+    print(f"📅 Всего дат: {len(MONTHLY_DATES)}\n")
+
+    # 1. data.group
+    print("📊 data.group ...")
+    df_group = generate_group_data()
+    save_parquet(df_group, "data_group.parquet", "data")
+    print(
+        f"     {len(GROUP_IDS)} групп × {len(MONTHLY_DATES)} дат = {len(df_group):,} строк"
+    )
+
+    # 2. data.well
+    print("📊 data.well ...")
+    df_well = generate_well_data()
+    save_parquet(df_well, "data_well.parquet", "data")
+    print(
+        f"     {len(WELL_IDS)} скважин × {len(MONTHLY_DATES)} дат = {len(df_well):,} строк"
+    )
+
+    # 3. data.connection
+    print("📊 data.connection ...")
+    df_conn = generate_connection_data()
+    save_parquet(df_conn, "data_connection.parquet", "data")
+    print(
+        f"     {N_CONNECTIONS} ячеек × {len(MONTHLY_DATES)} дат = {len(df_conn):,} строк"
+    )
+
+    # 4. unsumry.connection
+    print("📊 unsumry.connection ...")
+    df_unsumry = generate_connection_unsumry()
+    save_parquet(df_unsumry, "unsumry_connection.parquet", "unsumry")
+    print(
+        f"     {N_CONNECTIONS} ячеек × {len(MONTHLY_DATES)} дат = {len(df_unsumry):,} строк"
+    )
+
+    print(f"\n✅ Готово! Файлы сохранены в: {OUTPUT_DIR.absolute()}")
+    print("\n📋 Структура файлов:")
+    for f in sorted(OUTPUT_DIR.glob("*.parquet")):
+        pf = pq.ParquetFile(f)
+        print(
+            f"  • {f.name}: {pf.metadata.num_rows:,} строк, "
+            f"{len(pf.schema_arrow)} колонок"
+        )
+
+    # Статистика
+    total = sum(
+        pq.ParquetFile(f).metadata.num_rows for f in OUTPUT_DIR.glob("*.parquet")
+    )
+    print(f"\n📊 Всего строк во всех файлах: {total:,}")
+
+
+if __name__ == "__main__":
+    random.seed()
+    np.random.seed()
+    main()

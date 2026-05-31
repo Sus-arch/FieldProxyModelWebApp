@@ -1,0 +1,119 @@
+services:
+
+  # ──────────────────────────────────────────────
+  # PostgreSQL Database
+  # ──────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: app_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB:       ${POSTGRES_DB:-appdb}
+    ports:
+      - "5432:5432"
+    volumes:
+      # ⚠️ init.sql выполняется ТОЛЬКО при первом запуске (когда БД пуста)
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - postgres_data:/var/lib/postgresql/data  # ✅ Именованный том = данные сохраняются
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-appdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────────────────────
+  # 🔥 MINIO
+  # ──────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    volumes:
+      - minio_data:/data
+    ports:
+      - "19000:9000"   # API
+      - "19001:9001"   # Web-консоль
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  
+  # ──────────────────────────────────────────────
+  # 🔥 Migrations — run once after DB is ready
+  # ──────────────────────────────────────────────
+  migrate:
+    build: ./backend
+    container_name: app_migrate
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB:       ${POSTGRES_DB:-appdb}
+      POSTGRES_HOST:     db
+      POSTGRES_PORT:     5432
+      PYTHONPATH:        /app
+    command: >
+      sh -c "
+        echo '▶ Running Alembic migrations...' &&
+        alembic -c alembic.ini upgrade head &&
+        echo '✅ Migrations complete'
+      "
+    volumes:
+      - ./backend:/app
+    working_dir: /app
+    restart: "no"
+
+  # ──────────────────────────────────────────────
+  # 🔥 Backend — FastAPI (starts after migrations)
+  # ──────────────────────────────────────────────
+  backend:
+    build: ./backend
+    container_name: app_backend
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully  # ✅ Теперь зависит от migrate
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-appdb}
+      PYTHONPATH:   /app
+    volumes:
+      - ./backend:/app
+    working_dir: /app
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ──────────────────────────────────────────────
+  # 🔥 Frontend — React/Vite served via Nginx
+  # ──────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: app_frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "80:80"
+
+volumes:
+  postgres_data:  # ✅ Именованный том — данные НЕ удаляются при перезапуске
+  minio_data:
